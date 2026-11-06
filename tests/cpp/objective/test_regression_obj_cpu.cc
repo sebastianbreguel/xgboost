@@ -5,6 +5,13 @@
 #include <xgboost/context.h>
 #include <xgboost/objective.h>
 
+#include <cmath>    // for exp
+#include <cstddef>  // for size_t
+#include <memory>   // for unique_ptr
+#include <utility>  // for pair
+#include <vector>   // for vector
+
+#include "../../../src/common/math.h"  // for Sigmoid
 #include "../helpers.h"
 #include "test_regression_obj.h"
 
@@ -154,6 +161,30 @@ TEST(Objective, CoxRegressionGPair) {
 TEST(Objective, CoxRegressionInitEstimation) {
   Context ctx = MakeCUDACtx(GPUIDX);
   TestCoxRegressionInitEstimation(&ctx);
+}
+
+TEST(Objective, PredTransformAcrossBlocks) {
+  Context ctx;
+  ctx.UpdateAllowUnknown(Args{{"nthread", "16"}});
+  std::vector<std::pair<char const*, float (*)(float)>> objectives{
+      {"binary:logistic", [](float v) { return common::Sigmoid(v); }},
+      {"survival:aft", [](float v) { return std::exp(v); }}};
+  for (auto const& [name, expected] : objectives) {
+    std::unique_ptr<ObjFunction> obj{ObjFunction::Create(name, &ctx)};
+    obj->Configure({});
+    for (std::size_t n : {1, 2047, 2048, 2049, 5000}) {
+      std::vector<float> margins(n);
+      for (std::size_t i = 0; i < n; ++i) {
+        margins[i] = static_cast<float>(i % 17) - 8.0f;
+      }
+      HostDeviceVector<float> predt{margins};
+      obj->PredTransform(&predt, {n, 1});
+      auto const& h_predt = predt.ConstHostVector();
+      for (std::size_t i = 0; i < n; ++i) {
+        ASSERT_EQ(h_predt[i], expected(margins[i])) << name << " n=" << n << " i=" << i;
+      }
+    }
+  }
 }
 #endif
 
